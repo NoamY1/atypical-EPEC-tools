@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>GenBank Liftover (single genome, GBFF, hardened)</title>
+<style>
+  :root{--bg:#0b1020;--card:#121a32;--muted:#93a4c8;--text:#e7edff;--accent:#7aa2ff;--ok:#2dd4bf;--warn:#ffd166;--bad:#ff6b6b}
+  *{box-sizing:border-box}
+  body{margin:0;background:linear-gradient(180deg,#0b1020,#0e1430 40%,#0b1020);color:var(--text);font:14px/1.45 system-ui,Segoe UI,Roboto,Helvetica,Arial}
+  header{padding:16px;border-bottom:1px solid #1d2748;background:#0c132a;position:sticky;top:0;z-index:2}
+  h1{margin:0;font-size:18px}
+  main{padding:16px;max-width:1100px;margin:0 auto}
+  .row{display:flex;gap:16px;flex-wrap:wrap}
+  .card{background:#121a32;border:1px solid #1d2748;border-radius:12px;padding:16px;flex:1 1 340px;min-width:320px;box-shadow:0 8px 24px rgba(0,0,0,.25)}
+  label{display:block;margin:8px 0 6px 2px;color:var(--muted);font-size:12px}
+  input[type="text"],input[type="number"],select,textarea{width:100%;background:#0f1732;border:1px solid #202c53;border-radius:10px;color:var(--text);padding:10px 12px;outline:none}
+  input[type="file"]{width:100%}
+  button{background:var(--accent);color:#001035;border:none;border-radius:10px;padding:10px 14px;font-weight:700;cursor:pointer}
+  button.secondary{background:#1c2a55;color:#fff}
+  .muted{color:var(--muted)} .small{font-size:12px} .mono{font-family:ui-monospace,Consolas,Menlo,monospace}
+  .spacer{height:8px}
+  .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;margin-right:6px;border:1px solid #243059}
+  .ok{background:#0f2b2b;color:#7fe3d1}
+  .warn{background:#2b2430;color:#ffd166}
+  .bad{background:#3a2224;color:#ff9aa2}
+  table{width:100%;border-collapse:collapse;margin-top:10px}
+  th,td{border-bottom:1px solid #1e2b56;padding:8px 10px;text-align:left;vertical-align:top}
+  th{position:sticky;top:0;background:#0f1732;z-index:1}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+  details{border:1px solid #1d2748;border-radius:12px;padding:10px 12px;background:#0f1732}
+  summary{cursor:pointer;font-weight:700}
+  .log{white-space:pre-wrap;border:1px dashed #243059;border-radius:10px;padding:8px;max-height:220px;overflow:auto;background:#0f1732}
+</style>
+</head>
+<body>
+<header><h1>GenBank Liftover — single genome (offline, GBFF)</h1></header>
+<main>
+  <div class="row">
+    <section class="card">
+      <h3>1) Reference (well annotated)</h3>
+      <input type="file" id="refInput" accept=".gb,.gbk,.gbff,.genbank,.gbf"/>
+      <div id="refStatus" class="small muted">No file selected.</div>
+      <div id="refSummary" class="small mono"></div>
+      <div id="refWarn" class="small" style="color:#ffd166"></div>
+    </section>
+
+    <section class="card">
+      <h3>2) Target contigs (one genome, folder)</h3>
+      <input type="file" id="contigFolder" webkitdirectory directory multiple />
+      <div id="tgtStatus" class="small muted">No folder selected.</div>
+      <div id="tgtList" class="small mono" style="margin-top:6px;max-height:160px;overflow:auto;white-space:pre-line"></div>
+      <div id="tgtWarn" class="small" style="color:#ffd166;margin-top:6px"></div>
+      <div class="small muted" style="margin-top:6px">Pick the folder containing your .gb/.gbk/.gbff (unzipped).</div>
+    </section>
+
+    <section class="card">
+      <h3>3) Options</h3>
+      <div class="grid">
+        <div>
+          <label>Feature types</label>
+          <select id="featTypes" multiple size="4">
+            <option value="CDS" selected>CDS</option>
+            <option value="rRNA" selected>rRNA</option>
+            <option value="tRNA" selected>tRNA</option>
+            <option value="misc_feature">misc_feature</option>
+          </select>
+          <div class="small muted">Hold Ctrl/Cmd for multi-select.</div>
+        </div>
+        <div><label>Min identity (%)</label><input id="minId" type="number" value="92" min="50" max="100" step="0.5"/></div>
+        <div><label>Min coverage (%)</label><input id="minCov" type="number" value="90" min="50" max="100" step="0.5"/></div>
+        <div><label>Seed k-mer</label><input id="seedK" type="number" value="11" min="9" max="15"/></div>
+        <div><label>Max feature length (bp)</label><input id="maxFeat" type="number" value="12000" min="500" step="100"/></div>
+        <div><label>Locus_tag prefix (optional)</label><input id="tagPrefix" type="text" placeholder="e.g., ISO001_"/></div>
+        <div><label>Output filename</label><input id="outName" type="text" value="annotated_genome.gbff"/></div>
+        <div style="display:flex;align-items:center;gap:8px"><input id="safeMode" type="checkbox"/><label for="safeMode">Safe mode (lower memory)</label></div>
+
+        <!-- Filter by names/IDs -->
+        <div style="grid-column:1/-1">
+          <label>Only transfer these genes/CDS (comma/space separated; matches <span class="mono">/gene</span>, <span class="mono">/locus_tag</span>, <span class="mono">/protein_id</span>, or <span class="mono">/product</span>, case-insensitive)</label>
+          <input id="onlyList" type="text" placeholder="e.g., gyrA, gyrB, rpoB"/>
+          <div class="small muted">Still respects "Feature types". Leave empty to transfer all selected types.</div>
+        </div>
+
+        <!-- Speed knobs -->
+        <div><label>Candidate contigs (top N)</label><input id="topN" type="number" value="5" min="1" max="25"/></div>
+        <div><label>Early accept margin (%)</label><input id="earlyMargin" type="number" value="2" min="0" max="10" step="0.5"/></div>
+      </div>
+      <div class="spacer"></div>
+      <div class="flex" style="display:flex;gap:8px;align-items:center">
+        <button id="runBtn">Transfer features</button>
+        <button id="stopBtn" class="secondary">Stop</button>
+        <button id="saveLog" class="secondary">Download log</button>
+        <span id="runStatus" class="small muted"></span>
+      </div>
+      <div class="spacer"></div>
+      <div id="log" class="log small muted"></div>
+    </section>
+  </div>
+
+  <section class="card" id="results" style="display:none">
+    <h3>Results</h3>
+    <div id="globalSummary" class="small mono"></div>
+    <div class="spacer"></div>
+    <details open>
+      <summary>Placed/filtered features (review & export)</summary>
+      <div class="flex" style="justify-content:flex-end;gap:8px;margin:6px 0">
+        <button id="dlGB">Download annotated GBFF</button>
+        <button id="openGB" class="secondary">Open in new tab</button>
+        <button id="previewGB" class="secondary">Preview first record</button>
+        <button id="dlCSV" class="secondary">Export report (CSV)</button>
+      </div>
+      <div style="max-height:360px;overflow:auto;border:1px solid #1e2b56;border-radius:10px">
+        <table>
+          <thead><tr>
+            <th>OK</th><th>Type</th><th>Gene</th><th>Contig</th><th>Start</th><th>End</th>
+            <th>Strand</th><th>Identity%</th><th>Coverage%</th><th>Note</th>
+          </tr></thead>
+          <tbody id="tblBody"></tbody>
+        </table>
+      </div>
+      <div class="spacer"></div>
+      <textarea id="previewBox" rows="12" class="mono small" placeholder="Click 'Preview first record' to inspect the beginning of the GBFF text here…"></textarea>
+    </details>
+  </section>
+</main>
+
+<script>
+/* ==================== helpers & logging ==================== */
+const logEl = document.getElementById('log');
+function log(msg){ logEl.textContent += (logEl.textContent?'\n':'') + msg; logEl.scrollTop = logEl.scrollHeight; }
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+function isGB(name){ return /\.(gb|gbk|gbff|gbf|genbank)$/i.test(name||''); }
+document.getElementById('saveLog').onclick=()=>{ const blob=new Blob([logEl.textContent||''],{type:'text/plain'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='liftover_log.txt'; document.body.appendChild(a); a.click(); setTimeout(()=>{URL.revokeObjectURL(a.href); a.remove();},1200); };
+
+/* Month helper (avoid i18n issues) */
+const MONTH3 = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+function locusDateParts(){
+  const d = new Date();
+  return { mon: MONTH3[d.getMonth()], dat: String(d.getDate()).padStart(2,' '), yr: d.getFullYear() };
+}
+
+/* ==================== parsing (keep IUPAC DNA) ==================== */
+function cleanSeqChunk(s){ return String(s||'').replace(/[^A-Za-z]/g,'').toUpperCase().replace(/U/g,'T'); }
+function parseLocation(raw){
+  try{
+    let s=(raw||'').replace(/\s+/g,''); s=s.replace(/order\(/g,'join(');
+    function strip(x){return x.replace(/[<>]/g,'');}
+    function rec(seg,sgn=1){
+      while(seg.startsWith('complement(')&&seg.endsWith(')')){sgn*=-1; seg=seg.slice(11,-1);}
+      if(seg.startsWith('join(')&&seg.endsWith(')')){
+        const inside=seg.slice(5,-1); const parts=[]; let d=0, cur='';
+        for(let i=0;i<inside.length;i++){const c=inside[i]; if(c==='(')d++; if(c===')')d--; if(c===','&&d===0){parts.push(cur);cur='';} else cur+=c;}
+        if(cur)parts.push(cur); return parts.flatMap(p=>rec(p,sgn));
+      }
+      const m=strip(seg).match(/(\d+)\.\.(\d+)/); if(m) return [{start:+m[1],end:+m[2],strand:sgn}];
+      const m1=strip(seg).match(/^(\d+)$/); if(m1) return [{start:+m1[1],end:+m1[1],strand:sgn}];
+      return [];
+    }
+    return rec(s,1).sort((a,b)=>a.start-b.start);
+  }catch(e){ return []; }
+}
+function revComp(s){
+  const m={A:'T',T:'A',C:'G',G:'C',R:'Y',Y:'R',S:'S',W:'W',K:'M',M:'K',B:'V',V:'B',D:'H',H:'D',N:'N'};
+  return (s||'').toUpperCase().split('').reverse().map(x=>m[x]||'N').join('');
+}
+function extractSeq(rec,segments){
+  if(!rec||!rec.seq||!segments||!segments.length) return '';
+  let out=''; for(const seg of segments){const a=Math.max(1,seg.start|0)-1, b=Math.min(rec.seq.length,seg.end|0); if(b>a) out+=rec.seq.slice(a,b);}
+  if(segments[0] && (segments[0].strand|0)===-1) out = revComp(out);
+  return out;
+}
+async function parseGenBankText(text){
+  const lines = String(text||'').split(/\r?\n/);
+  const records=[];
+  let rec=null, inFeat=false, inOrigin=false, seqBuf=[];
+  let curFeat=null, curKey='', curVal='', isFlag=false;
+  let sawContigLine=false;
+
+  function pushFeat(){
+    if(!curFeat) return;
+    if(curKey){
+      curFeat.qual[curKey] = curFeat.qual[curKey]||[];
+      if(isFlag) curFeat.qual[curKey].push(true);
+      else curFeat.qual[curKey].push(curVal.replace(/^"/,'').replace(/"$/,'')); // strip quotes
+      curKey=''; curVal=''; isFlag=false;
+    }
+    curFeat.segments = parseLocation(curFeat.rawLoc||'');
+    (rec.features||[]).push(curFeat);
+    curFeat=null;
+  }
+  function pushRec(){
+    if(!rec) return;
+    try{
+      pushFeat();
+      rec.seq = cleanSeqChunk(seqBuf.join(''));
+      if(!Array.isArray(rec.features)) rec.features=[];
+      rec.hasSequence = rec.seq && rec.seq.length>0;
+      rec.hasContigJoinOnly = !rec.hasSequence && sawContigLine;
+      records.push(rec);
+    }catch(e){ /* tolerate */ }
+    rec=null; inFeat=false; inOrigin=false; seqBuf=[]; sawContigLine=false;
+  }
+
+  for(const L of lines){
+    try{
+      if(/^LOCUS\b/.test(L)){
+        pushRec();
+        const m=L.match(/^LOCUS\s+(\S+)/);
+        rec={id:(m?m[1]:'unknown'), features:[], seq:'', header:[L]};
+        continue;
+      }
+      if(!rec) continue;
+      if(/^FEATURES\b/.test(L)){ inFeat=true; inOrigin=false; continue; }
+      if(/^ORIGIN\b/.test(L)){ inFeat=false; inOrigin=true; continue; }
+      if(/^CONTIG\b/.test(L)){ sawContigLine=true; continue; }
+      if(/^\/\/\s*$/.test(L)){ pushRec(); continue; }
+
+      if(inOrigin){ const dna=cleanSeqChunk(L); if(dna) seqBuf.push(dna); continue; }
+
+      if(inFeat){
+        if(/^\s{5}\S/.test(L)){
+          pushFeat();
+          const m=L.match(/^\s{5}(\S+)\s+(.+)$/);
+          curFeat = m? {type:m[1], rawLoc:m[2], qual:{}} : null;
+          continue;
+        }
+        if(/^\s{21}\/\S+/.test(L) && curFeat){
+          if(curKey){
+            curFeat.qual[curKey]=curFeat.qual[curKey]||[];
+            if(isFlag) curFeat.qual[curKey].push(true);
+            else curFeat.qual[curKey].push(curVal.replace(/^"/,'').replace(/"$/,''));
+          }
+          const m=L.match(/^\s{21}\/(\S+?)(?:=(.+))?$/);
+          curKey=m?m[1]:'';
+          curVal=m&&m[2]?m[2].trim():'';
+          isFlag = !(m && m[2]);
+          continue;
+        }
+        if(/^\s{21}(?!\/)(.+)$/.test(L) && curFeat && curKey){
+          curVal += ' ' + L.slice(21).trim();
+          continue;
+        }
+      }
+    }catch(e){ /* keep going */ }
+  }
+  pushRec();
+  return records;
+}
+
+/* ==================== mapping (seed + banded align) ==================== */
+function buildKmerIndex(seq,k=11){
+  const map=new Map(); const S=(seq||'').toUpperCase();
+  if(!S) return map;
+  for(let i=0;i+k<=S.length;i++){
+    const s=S.slice(i,i+k); if(/[^ACGT]/.test(s)) continue; // index ACGT seeds
+    const arr=map.get(s); if(arr) arr.push(i); else map.set(s,[i]);
+  }
+  return map;
+}
+function clusterOffsets(hits,bin=20){
+  if(!hits||!hits.length) return null;
+  const buckets=new Map();
+  for(const off of hits){ const key=Math.round(off/bin); const arr=buckets.get(key); if(arr) arr.push(off); else buckets.set(key,[off]); }
+  let bestKey=null, bestCount=-1;
+  for(const [k,arr] of buckets.entries()){ if(arr.length>bestCount){bestCount=arr.length; bestKey=k;} }
+  const arr=buckets.get(bestKey)||[];
+  const mean = arr.reduce((a,b)=>a+b,0)/(arr.length||1);
+  return {center:mean, support:arr.length, arr};
+}
+function alignBanded(q,t,opts){
+  const band = (opts&&opts.band)|0 || 40;
+  const m=(q||'').length, n=(t||'').length;
+  if(!m||!n) return {ident:0};
+  const match=2,mismatch=-1,gap=-2, NEG=-32760;
+  const dp=new Int16Array(n+1).fill(NEG);
+  const dpPrev=new Int16Array(n+1).fill(NEG);
+  dpPrev[0]=0;
+  for(let i=1;i<=m;i++){
+    const jmin=Math.max(0,i-band), jmax=Math.min(n,i+band);
+    dp.fill(NEG,0,n+1);
+    for(let j=jmin;j<=jmax;j++){
+      let best=NEG;
+      if(j>0){ const d=dpPrev[j-1]+(q[i-1]===t[j-1]?match:mismatch); if(d>best) best=d; }
+      const u=dpPrev[j]+gap; if(u>best) best=u;
+      const l=dp[j-1]+gap;   if(l>best) best=l;
+      dp[j]=best;
+    }
+    dpPrev.set(dp);
+  }
+  const len=Math.min(m,n); let mm=0; for(let i=0;i<len;i++){ if(q[i]===t[i]) mm++; }
+  return {ident: len? (100*mm/len):0};
+}
+function shortlistContigs(query, targets, k, topN){
+  const rc = revComp(query);
+  const step = Math.max(1, k);
+  const scores=[];
+  for(const t of targets){
+    const idx=t.index; if(!idx) continue;
+    let s=0;
+    for(let i=0;i+k<=query.length;i+=step){ const seed=query.slice(i,i+k); if(/[^ACGT]/.test(seed)) continue; const pos=idx.get(seed); if(pos && pos.length) s++; }
+    for(let i=0;i+k<=rc.length;i+=step){ const seed=rc.slice(i,i+k); if(/[^ACGT]/.test(seed)) continue; const pos=idx.get(seed); if(pos && pos.length) s++; }
+    if(s>0) scores.push({t,score:s});
+  }
+  scores.sort((a,b)=>b.score-a.score);
+  return scores.slice(0, Math.max(1, topN)).map(x=>x.t);
+}
+function mapOnContig(refDNA, contig, k, safe){
+  const t = contig; const idx=t.index; if(!idx) return null;
+  const rcRef = revComp(refDNA);
+  const step = Math.max(1, Math.floor(k/2));
+  let best=null;
+  function scan(query, strand){
+    const hits=[];
+    for(let i=0;i+k<=query.length;i+=step){
+      const seed=query.slice(i,i+k); const pos=idx.get(seed); if(!pos) continue;
+      for(const p of pos) hits.push(p - i);
+    }
+    const clu = clusterOffsets(hits, Math.max(10,Math.floor(k*1.5))); if(!clu) return;
+    const windowExtra = safe? 40 : Math.max(100, Math.floor(query.length*0.2));
+    const start = Math.max(0, Math.round(clu.center));
+    const end = Math.min(t.seq.length, start + query.length + windowExtra);
+    const sub = t.seq.slice(start, end);
+    const aln = alignBanded(query, sub, {band: safe? 30 : 60});
+    const cov = Math.min(100, 100*sub.length/Math.max(1,refDNA.length));
+    const cand = {contig:t.id, strand, start:start+1, end:start+query.length, ident:aln.ident, cov};
+    if(!best || cand.ident>best.ident) best=cand;
+  }
+  scan(refDNA, +1); scan(rcRef, -1); return best;
+}
+
+/* ==================== writing (robust GBFF) ==================== */
+const CODON_TABLE = {TTT:'F',TTC:'F',TTA:'L',TTG:'L',TCT:'S',TCC:'S',TCA:'S',TCG:'S',TAT:'Y',TAC:'Y',TAA:'*',TAG:'*',TGT:'C',TGC:'C',TGA:'*',TGG:'W',CTT:'L',CTC:'L',CTA:'L',CTG:'L',CCT:'P',CCC:'P',CCA:'P',CCG:'P',CAT:'H',CAC:'H',CAA:'Q',CAG:'Q',CGT:'R',CGC:'R',CGA:'R',CGG:'R',ATT:'I',ATC:'I',ATA:'I',ATG:'M',ACT:'T',ACC:'T',ACA:'T',ACG:'T',AAT:'N',AAC:'N',AAA:'K',AAG:'K',AGT:'S',AGC:'S',AGA:'R',AGG:'R',GTT:'V',GTC:'V',GTA:'V',GTG:'V',GCT:'A',GCC:'A',GCA:'A',GCG:'A',GAT:'D',GAC:'D',GAA:'E',GAG:'E',GGT:'G',GGC:'G',GGA:'G',GGG:'G'};
+function translateDNA(dna){const s=cleanSeqChunk(dna); let aa=''; for(let i=0;i+2<s.length;i+=3){aa+=CODON_TABLE[s.slice(i,i+3)]||'X';} return aa;}
+function sanitizeSegments(segments){
+  if(!Array.isArray(segments)) return [];
+  const san=[]; for(const seg of segments){
+    const a = Math.max(1, Number.isFinite(seg?.start)? Math.floor(seg.start):NaN);
+    const b = Math.max(1, Number.isFinite(seg?.end)? Math.floor(seg.end):NaN);
+    const strand = (seg?.strand===-1||seg?.strand===1) ? seg.strand : 1;
+    if(Number.isFinite(a)&&Number.isFinite(b)){ const s=Math.min(a,b), e=Math.max(a,b); san.push({start:s,end:e,strand}); }
+  } return san;
+}
+function formatLoc(segments){
+  const segs = sanitizeSegments(segments);
+  if(!segs.length) return ''; // skip empty
+  const strand=(segs[0].strand|0)||1;
+  const core=(segs.length>1? 'join(':'') + segs.map(x=>`${x.start}..${x.end}`).join(',') + (segs.length>1?')':'');
+  return strand===-1? `complement(${core})` : core;
+}
+function safeQualValue(v){
+  if(v===true) return true;
+  if(v===null || v===undefined) return '';
+  let s = (typeof v==='string') ? v : (typeof v==='number'||typeof v==='boolean') ? String(v) : JSON.stringify(v);
+  return s.replace(/\r?\n/g,' ').trim();
+}
+function wrapQualLine(key, value){
+  const baseIndent = '                     '; // 21 spaces
+  if(value===true) return [`${baseIndent}/${key}`];
+  const raw = JSON.stringify(value);
+  const maxWidth = 80;
+  const prefix = `${baseIndent}/${key}=`;
+  const room = maxWidth - prefix.length;
+  if(raw.length <= room) return [`${prefix}${raw}`];
+  const contIndent = '                      ';
+  const lines=[]; let i=0;
+  lines.push(`${prefix}${raw.slice(0, room)}`); i += room;
+  while(i < raw.length){ lines.push(`${contIndent}${raw.slice(i, i+maxWidth-contIndent.length)}`); i += (maxWidth - contIndent.length); }
+  return lines;
+}
+function ensureSourceFeature(feats, len){
+  const has = (feats||[]).some(f=>String(f.type).toLowerCase()==='source');
+  if(has) return feats;
+  const sf = {type:'source', segments:[{start:1,end:Math.max(1,len),strand:1}], qual:{organism:['unknown']}}
+  return [sf, ...(feats||[])];
+}
+function writeGenBankRecord(rec){
+  const EOL = '\r\n';
+  const id = rec?.id ? String(rec.id) : 'unknown';
+  const seq = cleanSeqChunk(rec?.seq||'');
+  const feats = ensureSourceFeature(Array.isArray(rec?.features)?rec.features:[], seq.length);
+
+  const lines=[];
+  const {mon,dat,yr} = locusDateParts();
+
+  // Header
+  lines.push(`LOCUS       ${id.padEnd(16)} ${String(seq.length).padStart(11)} bp    DNA     linear       ${mon} ${dat} ${yr}`);
+  lines.push(`DEFINITION  .`);
+  lines.push(`ACCESSION   ${id}`);
+  lines.push(`VERSION     ${id}.1`);
+  lines.push(`KEYWORDS    .`);
+  lines.push(`SOURCE      unknown.`);
+  lines.push(`  ORGANISM  unknown`);
+  lines.push(`            .`);
+  lines.push(`FEATURES             Location/Qualifiers`);
+
+  // Features
+  for(const f of feats){
+    try{
+      const type = String(f?.type||'misc_feature');
+      const loc = formatLoc(f?.segments||[]);
+      if(!loc){ continue; }
+      lines.push(`     ${type.padEnd(16)} ${loc}`);
+      const q=f?.qual||{};
+      for(const k of Object.keys(q)){
+        const arr = Array.isArray(q[k]) ? q[k] : [q[k]];
+        for(const raw of arr){
+          const v = safeQualValue(raw); const wrapped = wrapQualLine(k,v);
+          for(const L of wrapped) lines.push(L);
+        }
+      }
+    }catch(eFeat){ console.warn('Skip malformed feature:', eFeat); continue; }
+  }
+
+  // Sequence
+  const A=(seq.match(/A/g)||[]).length, C=(seq.match(/C/g)||[]).length, G=(seq.match(/G/g)||[]).length, T=(seq.match(/T/g)||[]).length;
+  lines.push(`BASE COUNT      ${String(A).padStart(7)} a   ${String(C).padStart(7)} c   ${String(G).padStart(7)} g   ${String(T).padStart(7)} t`);
+  lines.push(`ORIGIN`);
+  for(let i=0;i<seq.length;i+=60){
+    const chunk=seq.slice(i,i+60).toLowerCase();
+    const parts=chunk.match(/.{1,10}/g)||[chunk];
+    lines.push((String(i+1).padStart(9,' '))+' '+parts.join(' '));
+  }
+  lines.push(`//`);
+  return lines.join(EOL)+EOL;
+}
+function writeGenBankRecordFallback(rec){
+  const EOL='\r\n';
+  const id = rec?.id ? String(rec.id) : 'unknown';
+  const seq = cleanSeqChunk(rec?.seq||'');
+  const {mon,dat,yr} = locusDateParts();
+  const lines = [
+    `LOCUS       ${id.padEnd(16)} ${String(seq.length).padStart(11)} bp    DNA     linear       ${mon} ${dat} ${yr}`,
+    `DEFINITION  .`,
+    `ACCESSION   ${id}`,
+    `VERSION     ${id}.1`,
+    `KEYWORDS    .`,
+    `SOURCE      unknown.`,
+    `  ORGANISM  unknown`,
+    `            .`,
+    `FEATURES             Location/Qualifiers`,
+    `     source          1..${Math.max(1,seq.length)}`,
+    `                     /organism="unknown"`,
+    `BASE COUNT      ${String((seq.match(/A/g)||[]).length).padStart(7)} a   ${String((seq.match(/C/g)||[]).length).padStart(7)} c   ${String((seq.match(/G/g)||[]).length).padStart(7)} g   ${String((seq.match(/T/g)||[]).length).padStart(7)} t`,
+    `ORIGIN`
+  ];
+  for(let i=0;i<seq.length;i+=60){
+    const chunk=seq.slice(i,i+60).toLowerCase();
+    const parts=chunk.match(/.{1,10}/g)||[chunk];
+    lines.push((String(i+1).padStart(9,' '))+' '+parts.join(' '));
+  }
+  lines.push(`//`);
+  return lines.join(EOL)+EOL;
+}
+
+/* ==================== state ==================== */
+let REF=null;               // {name, records:[{id,seq,features,...}]}
+let TARGET={records:[]};    // aggregated contigs
+let STOP=false;
+let REPORT=[];              // mapping rows
+let OUT_RECS=[];            // annotated output records
+
+/* ==================== UI wiring ==================== */
+document.getElementById('refInput').addEventListener('change', async ev=>{
+  const f=ev.target.files?.[0]; if(!f) return;
+  document.getElementById('refStatus').textContent='Parsing reference…';
+  log('Parsing reference '+f.name);
+  try{
+    const text=await f.text();
+    const recs=await parseGenBankText(text);
+    REF={name:f.name, records:recs};
+    const totalFeats=recs.reduce((s,r)=>s+(r.features?.length||0),0);
+    const zeroSeq = recs.filter(r=>!r.hasSequence).length;
+    document.getElementById('refStatus').innerHTML=`<span class="pill ok">Loaded</span> ${recs.length} record(s), ${totalFeats} feature(s).`;
+    document.getElementById('refSummary').textContent=recs.map(r=>`${r.id}: len=${(r.seq||'').length}, feats=${(r.features||[]).length}`).join(' | ');
+    document.getElementById('refWarn').textContent = zeroSeq? `⚠ ${zeroSeq}/${recs.length} reference record(s) have 0 bp (no ORIGIN). Those will be ignored.` : '';
+    if(zeroSeq) log('WARNING: reference contains records with no ORIGIN sequence; they will be skipped.');
+  }catch(e){
+    document.getElementById('refStatus').innerHTML=`<span class="pill bad">Error</span>`;
+    document.getElementById('refWarn').textContent='';
+    log('Reference parse error: '+(e.message||e));
+  }
+});
+
+document.getElementById('contigFolder').addEventListener('change', async ev=>{
+  const files=Array.from(ev.target.files||[]).filter(f=>isGB(f.name));
+  TARGET={records:[]}; REPORT=[]; OUT_RECS=[];
+  document.getElementById('tgtStatus').textContent=`Reading ${files.length} GenBank file(s)…`;
+  log('Reading target folder: '+files.length+' GB/GBFF file(s)');
+  const listEl=document.getElementById('tgtList'); listEl.innerHTML='';
+  let shown=0, totalBases=0, contigOnly=0;
+  for(const f of files){
+    try{
+      const text=await f.text();
+      const recs=await parseGenBankText(text);
+      TARGET.records.push(...recs);
+      const baseSum = recs.reduce((a,r)=>a+(r.seq?r.seq.length:0),0);
+      totalBases += baseSum;
+      contigOnly += recs.filter(r=>r.hasContigJoinOnly).length;
+      if(++shown<=8) listEl.innerHTML += `${f.name}: ${recs.length} record(s), bases=${baseSum}\n`;
+      await sleep(0);
+    }catch(e){
+      log('Skip file (parse error): '+f.name+' — '+(e.message||e));
+    }
+  }
+  if(shown<files.length) listEl.innerHTML += `…+${files.length-shown} more file(s)\n`;
+  const zeroSeq = TARGET.records.filter(r=>!r.hasSequence).length;
+  document.getElementById('tgtStatus').innerHTML=`<span class="pill ok">Ready</span> ${TARGET.records.length} record(s) parsed; bases=${totalBases}`;
+  document.getElementById('tgtWarn').textContent = zeroSeq
+    ? `⚠ ${zeroSeq}/${TARGET.records.length} target record(s) have 0 bp (no ORIGIN). They will be skipped. ${contigOnly? 'Some have CONTIG/WGS stubs only; raw sequence is not present in the GBFF.':''}`
+    : '';
+  if(zeroSeq) log('WARNING: target contains records with no ORIGIN sequence; they will be skipped.');
+});
+document.getElementById('stopBtn').onclick=()=>{ STOP=true; log('Stopping after current step…'); };
+
+/* ==================== main run ==================== */
+function ensureTargetIndex(k){
+  for(const r of TARGET.records){
+    try{ r.index = r.seq && r.seq.length ? buildKmerIndex(r.seq, k) : new Map(); }catch(e){ r.index = new Map(); }
+  }
+}
+function featureAliases(feat){
+  const q = feat?.qual || {};
+  const g = k => (Array.isArray(q[k]) ? q[k] : (q[k] ? [q[k]] : [])).map(v=>String(v).replace(/^"+|"+$/g,'').toLowerCase());
+  return [ ...g('gene'), ...g('locus_tag'), ...g('protein_id'), ...g('product'), ...g('label'), ...g('note'), ...g('Name'), ...g('ID') ].filter(Boolean);
+}
+
+document.getElementById('runBtn').addEventListener('click', async ()=>{
+  STOP=false;
+  if(!REF){ alert('Load a reference GenBank first'); return; }
+  if(!TARGET.records.length){ alert('Load a folder with target contig GenBank files'); return; }
+
+  const minId=parseFloat(document.getElementById('minId').value||'92');
+  const minCov=parseFloat(document.getElementById('minCov').value||'90');
+  const k=parseInt(document.getElementById('seedK').value||'11',10);
+  const maxFeat=parseInt(document.getElementById('maxFeat').value||'12000',10);
+  const types=[...document.getElementById('featTypes').selectedOptions].map(o=>o.value);
+  const tagPrefix=(document.getElementById('tagPrefix').value||'').trim();
+  const safe = !!document.getElementById('safeMode').checked;
+  const onlyList=(document.getElementById('onlyList').value||'').trim();
+  const ONLY = onlyList ? onlyList.split(/[,;\s]+/).map(s=>s.trim().toLowerCase()).filter(Boolean) : [];
+  const topN = Math.max(1, parseInt(document.getElementById('topN').value||'5',10));
+  const earlyMargin = Math.max(0, parseFloat(document.getElementById('earlyMargin').value||'2'));
+
+  REPORT=[]; OUT_RECS=[];
+  document.getElementById('runStatus').textContent='Collecting reference features…';
+  log('Scanning reference features');
+  if(ONLY.length){ log('Only-transfer filter: '+ONLY.join(', ')); }
+  log(`Speed: shortlist top ${topN}; early accept +${earlyMargin}%`);
+
+  const REF_WITH_SEQ = REF.records.filter(r=>r.hasSequence);
+  const TGT_WITH_SEQ = TARGET.records.filter(r=>r.hasSequence);
+  if(!TGT_WITH_SEQ.length){ alert('All target records have 0 bp (no ORIGIN). Cannot lift over without sequence.'); return; }
+  if(!REF_WITH_SEQ.length){ alert('All reference records have 0 bp (no ORIGIN). Cannot lift over without sequence.'); return; }
+
+  const refFeats=[];
+  for(const r of REF_WITH_SEQ){
+    for(const f of r.features||[]){
+      if(!types.includes(f.type)) continue;
+      if(ONLY.length){
+        const aliases = featureAliases(f);
+        const hit = aliases.some(s => ONLY.some(tok => s.includes(tok)));
+        if(!hit) continue;
+      }
+      const segs = f.segments || parseLocation(f.rawLoc||''); if(!segs||!segs.length) continue;
+      const dna=extractSeq(r,segs); if(!dna || dna.length<21) continue;
+      if(dna.length>maxFeat){
+        REPORT.push({ok:false,type:f.type,gene:(f.qual?.gene||[''])[0]||'',contig:'',start:'',end:'',strand:'',id:'',cov:'',note:`too long (${dna.length}bp>${maxFeat})`});
+        continue;
+      }
+      refFeats.push({refRec:r, feat:f, dna});
+    }
+  }
+  log(`Reference features to try (after filters): ${refFeats.length}`);
+  if(!refFeats.length) log('NOTE: No reference features matched the filters.');
+
+  log(`Building k-mer index on ${TGT_WITH_SEQ.length}/${TARGET.records.length} target record(s), k=${k}`);
+  ensureTargetIndex(k);
+
+  const targets = TGT_WITH_SEQ.map(r=>({id:r.id, seq:r.seq, index:r.index}));
+
+  let placed=0, tried=0, usedShortlist=0, earlyAccepted=0;
+  for(const rf of refFeats){
+    if(STOP){ break; }
+    tried++;
+    if(tried%25===0){ document.getElementById('runStatus').textContent=`Mapping… ${tried}/${refFeats.length}`; await sleep(0); }
+    try{
+      const candidates = shortlistContigs(rf.dna, targets, k, topN);
+      if(candidates.length) usedShortlist++;
+
+      let best=null, accepted=null;
+      const candOrder = candidates.length ? candidates : targets;
+      for(const t of candOrder){
+        const hit = mapOnContig(rf.dna, t, k, safe);
+        if(!hit) continue;
+        const rec = TARGET.records.find(r=>r.id===hit.contig);
+        const start0=Math.max(0, hit.start-1);
+        const end0 = Math.min(rec.seq.length, start0 + rf.dna.length + (safe? 30:60));
+        const region = rec.seq.slice(start0, end0);
+        const q = (hit.strand===1)? rf.dna : revComp(rf.dna);
+        const id = alignBanded(q, region, {band: safe?30:60}).ident;
+        const cov = Math.min(100, 100*region.length/Math.max(1,rf.dna.length));
+        const candRefined = {...hit, id, cov};
+        if(!best || candRefined.id>best.id) best=candRefined;
+        if(id >= (minId + earlyMargin) && cov >= (minCov + earlyMargin)){ accepted = candRefined; earlyAccepted++; break; }
+      }
+
+      const finalHit = accepted || best;
+      if(!finalHit){
+        REPORT.push({ok:false,type:rf.feat.type,gene:(rf.feat.qual?.gene||[''])[0]||'',contig:'',start:'',end:'',strand:'',id:'',cov:'',note:'no hit'});
+        continue;
+      }
+      if(finalHit.id<minId || finalHit.cov<minCov){
+        REPORT.push({ok:false,type:rf.feat.type,gene:(rf.feat.qual?.gene||[''])[0]||'',contig:finalHit.contig,start:finalHit.start,end:finalHit.end,strand:finalHit.strand,id:finalHit.id.toFixed(1),cov:finalHit.cov.toFixed(1),note:'below threshold'});
+        continue;
+      }
+
+      const rec = TARGET.records.find(r=>r.id===finalHit.contig);
+      const endCoord = finalHit.start + rf.dna.length - 1;
+      const region = rec.seq.slice(finalHit.start-1, Math.min(rec.seq.length, finalHit.start-1 + rf.dna.length + (safe?30:60)));
+      const seqOnTarget = (finalHit.strand===1)? region : revComp(region);
+      const qual = JSON.parse(JSON.stringify(rf.feat.qual||{}));
+      if(rf.feat.type==='CDS'){ qual.translation = [translateDNA(seqOnTarget)]; }
+      const inf=`similar to DNA sequence:Ref:${rf.refRec.id}`;
+      qual.inference = [...(qual.inference||[]), inf];
+      const note = `lifted from ${rf.refRec.id}; id=${finalHit.id.toFixed(1)}%; cov=${finalHit.cov.toFixed(1)}%`;
+      qual.note = [...(qual.note||[]), note];
+      if(tagPrefix){
+        if(qual.locus_tag && qual.locus_tag.length){ qual.locus_tag = qual.locus_tag.map(x=> tagPrefix + String(x).replace(/^"+|"+$/g,'')); }
+        else { qual.locus_tag = [tagPrefix + '00001']; }
+      }
+      const newF = {type:rf.feat.type, segments:[{start:finalHit.start, end:endCoord, strand:finalHit.strand}], qual};
+      REPORT.push({ok:true,type:rf.feat.type,gene:(rf.feat.qual?.gene||[''])[0]||'',contig:finalHit.contig,start:finalHit.start,end:endCoord,strand:finalHit.strand,id:finalHit.id.toFixed(1),cov:finalHit.cov.toFixed(1),note: accepted?'early accept':''});
+
+      let out = OUT_RECS.find(x=>x.id===finalHit.contig);
+      if(!out){ const orig = TARGET.records.find(r=>r.id===finalHit.contig); out={id:orig.id, seq:orig.seq, features:[...(orig.features||[])]}; OUT_RECS.push(out); }
+      out.features.push(newF);
+      placed++;
+    }catch(e){
+      log('Mapping error on a feature: '+(e.message||e));
+    }
+  }
+  document.getElementById('runStatus').textContent='';
+  log(`Done. Tried ${tried}, placed ${placed}. Shortlist used: ${usedShortlist}; early-accepted: ${earlyAccepted}.`);
+
+  // include untouched contigs
+  for(const r of TGT_WITH_SEQ){ if(!OUT_RECS.find(x=>x.id===r.id)) OUT_RECS.push({id:r.id, seq:r.seq, features:[...(r.features||[])]}); }
+
+  // render table
+  const tbody=document.getElementById('tblBody'); tbody.innerHTML='';
+  for(const r of REPORT){
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${r.ok?'<span class="pill ok">OK</span>':'<span class="pill warn">Skip</span>'}</td>
+      <td>${r.type}</td><td>${r.gene||''}</td>
+      <td class="mono">${r.contig||''}</td>
+      <td class="mono">${r.start||''}</td>
+      <td class="mono">${r.end||''}</td>
+      <td class="mono">${r.strand===-1?'-':(r.strand===1?'+':'')}</td>
+      <td class="mono">${r.id||''}</td>
+      <td class="mono">${r.cov||''}</td>
+      <td class="small muted">${r.note||''}</td>`;
+    tbody.appendChild(tr);
+  }
+  const filterNote = ONLY.length ? ` | filter: ${ONLY.join(', ')}` : '';
+  document.getElementById('globalSummary').textContent = `Placed ${placed} / ${tried} features across ${TGT_WITH_SEQ.length} target contig(s).${filterNote}`;
+  document.getElementById('results').style.display='block';
+});
+
+/* ==================== downloads & preview ==================== */
+function buildGenBankTextAndStats(){
+  if(!OUT_RECS.length) throw new Error('No output records yet.');
+  let ok=0, fallback=0;
+  const chunks=[];
+  for(const rec of OUT_RECS){
+    try{
+      const txt = writeGenBankRecord(rec);
+      if(!txt || txt.trim().length<20){ chunks.push(writeGenBankRecordFallback(rec)); fallback++; }
+      else { chunks.push(txt); ok++; }
+    }catch(e){
+      console.warn('Record write failed, using fallback:', e);
+      chunks.push(writeGenBankRecordFallback(rec)); fallback++;
+    }
+  }
+  const text = chunks.join('');
+  const sizeBytes = new Blob([text],{type:'text/plain;charset=utf-8'}).size;
+  const totalBases = OUT_RECS.reduce((s,r)=>s+(r.seq? cleanSeqChunk(r.seq).length:0),0);
+  return {text, sizeBytes, ok, fallback, totalBases, totalRecs: OUT_RECS.length};
+}
+function downloadGBFF(){
+  try{
+    const {text,sizeBytes,ok,fallback,totalBases,totalRecs} = buildGenBankTextAndStats();
+    const mb=(sizeBytes/1048576).toFixed(2);
+    log(`GBFF size ≈ ${mb} MB; records=${totalRecs} (ok=${ok}, fallback=${fallback}); bases=${totalBases}`);
+    const name = (document.getElementById('outName').value || 'annotated_genome.gbff').replace(/[\/\\:*?"<>|]+/g,'_');
+    const blob = new Blob([text],{type:'text/plain;charset=utf-8'});
+    const url = (window.URL||window.webkitURL).createObjectURL(blob);
+    const a = document.createElement('a'); a.href=url; a.download=name; a.rel='noopener'; a.style.display='none';
+    document.body.appendChild(a); a.click();
+    setTimeout(()=>{ try{document.body.removeChild(a);}catch(_){} (window.URL||window.webkitURL).revokeObjectURL(url); }, 30000);
+  }catch(e){
+    console.error('Download failed:', e);
+    alert('Could not generate the GenBank file: '+(e?.message||'unknown error'));
+  }
+}
+document.getElementById('dlGB').onclick = downloadGBFF;
+
+document.getElementById('openGB').onclick = () => {
+  try{
+    const {text,sizeBytes,ok,fallback,totalBases,totalRecs} = buildGenBankTextAndStats();
+    const mb=(sizeBytes/1048576).toFixed(2);
+    log(`GBFF (preview) size ≈ ${mb} MB; records=${totalRecs} (ok=${ok}, fallback=${fallback}); bases=${totalBases}`);
+    const blob = new Blob([text],{type:'text/plain;charset=utf-8'});
+    const url = (window.URL||window.webkitURL).createObjectURL(blob);
+    const w = window.open('', '_blank');
+    if(w){ w.document.open(); w.document.write('<pre style="white-space:pre-wrap;word-wrap:break-word">'+
+              text.substring(0,250000).replace(/[&<>]/g, s=>({ '&':'&amp;','<':'&lt;','>':'&gt;' }[s]))+
+              (text.length>250000?'\n…(truncated preview)…':'')+
+              '</pre>'); w.document.close(); }
+    setTimeout(()=>{ (window.URL||window.webkitURL).revokeObjectURL(url); }, 60000);
+  }catch(e){
+    console.error('Open failed:', e);
+    alert('Could not generate the GenBank file: '+(e?.message||'unknown error'));
+  }
+};
+
+document.getElementById('previewGB').onclick = () => {
+  try{
+    const {text} = buildGenBankTextAndStats();
+    document.getElementById('previewBox').value = text.substring(0, 10000);
+  }catch(e){
+    document.getElementById('previewBox').value = 'Preview error: '+(e?.message||e);
+  }
+};
+
+document.getElementById('dlCSV').onclick=()=>{
+  if(!REPORT.length){ alert('No report to export.'); return; }
+  const header='OK,Type,Gene,Contig,Start,End,Strand,Identity,Coverage,Note';
+  const lines=[header].concat(REPORT.map(r=>[
+    r.ok?'OK':'SKIP', r.type, r.gene||'', r.contig||'', r.start||'', r.end||'',
+    (r.strand===-1?'-':(r.strand===1?'+':'')), r.id||'', r.cov||'', r.note||''
+  ].map(x=>String(x).includes(',')?`"${String(x).replace(/"/g,'""')}"`:x).join(',')));
+  const blob=new Blob([lines.join('\r\n')],{type:'text/csv;charset=utf-8;'});
+  const url=(window.URL||window.webkitURL).createObjectURL(blob);
+  const a=document.createElement('a'); a.href=url; a.download='liftover_report.csv'; a.style.display='none';
+  document.body.appendChild(a); a.click();
+  setTimeout(()=>{try{document.body.removeChild(a);}catch(e){} (window.URL||window.webkitURL).revokeObjectURL(url);},1500);
+};
+</script>
+</body>
+</html>

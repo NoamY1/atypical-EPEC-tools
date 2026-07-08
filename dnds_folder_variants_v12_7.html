@@ -1,0 +1,978 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>dN/dS — GenBank in the browser (folder loader, per-length consensus, variant summary + tree)</title>
+<style>
+  :root{--bg:#0b1020;--card:#121a32;--muted:#93a4c8;--text:#e7edff;--accent:#7aa2ff;--danger:#ff6b6b;--warn:#ffd166;--ok:#2dd4bf;}
+  *{box-sizing:border-box}
+  body{margin:0;background:linear-gradient(180deg,#0b1020,#0e1430 40%,#0b1020);color:var(--text);font:14px/1.4 system-ui,Segoe UI,Roboto,Helvetica,Arial}
+  header{padding:20px 16px;border-bottom:1px solid #1d2748;background:#0c132a;position:sticky;top:0;z-index:2}
+  h1{margin:0;font-size:18px;font-weight:700;letter-spacing:.3px}
+  main{padding:16px;max-width:1200px;margin:0 auto}
+  .row{display:flex;gap:16px;flex-wrap:wrap}
+  .card{background:var(--card);border:1px solid #1d2748;border-radius:12px;padding:16px;flex:1 1 360px;min-width:320px;box-shadow:0 8px 24px rgba(0,0,0,.25)}
+  label{display:block;margin:8px 0 6px 2px;color:var(--muted);font-size:12px}
+  input[type="text"],input[type="number"],select{width:100%;background:#0f1732;border:1px solid #202c53;border-radius:10px;color:var(--text);padding:10px 12px;outline:none}
+  input[type="file"]{width:100%}
+  button{background:var(--accent);color:#001035;border:none;border-radius:10px;padding:10px 14px;font-weight:700;cursor:pointer}
+  button.secondary{background:#1c2a55;color:var(--text)}
+  table{width:100%;border-collapse:collapse;margin-top:10px}
+  th,td{border-bottom:1px solid #1e2b56;padding:8px 10px;text-align:left;vertical-align:top}
+  th{position:sticky;top:0;background:#0f1732;z-index:1}
+  .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;margin-right:6px}
+  .pill.warn{background:#2b2430;color:#ffd166;border:1px solid #4a334d}
+  .pill.danger{background:#3a2224;color:#ff9aa2;border:1px solid #5a2a2e}
+  .pill.ok{background:#0f2b2b;color:#7fe3d1;border:1px solid #1f4b4b}
+  .pill.neutral{background:#19223f;color:#b9c5ea;border:1px solid #243059}
+  .pill.info{background:#0f2145;color:#9ec3ff;border:1px solid #1c3b7f}
+  .muted{color:var(--muted)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+  .small{font-size:12px}
+  .mono{font-family: ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}
+  .flex{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .spacer{height:8px}
+  .error{color:#ff9aa2;white-space:pre-wrap}
+  .oktxt{color:#7fe3d1}
+  details{border:1px solid #1d2748;border-radius:12px;padding:10px 12px;background:#0f1732}
+  summary{cursor:pointer;font-weight:700}
+  .controls-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+  .svgWrap{background:#0f1732;border:1px solid #1e2b56;border-radius:10px;padding:8px;overflow:auto}
+  .mini{font-size:11px}
+</style>
+</head>
+<body>
+<header>
+  <h1>dN/dS — GenBank in the browser (codon-aware, per-length consensus, variant tree)</h1>
+</header>
+<main>
+  <div class="row">
+    <section class="card">
+      <h3>1) Load your collection (folder)</h3>
+      <p class="muted small">Pick the <b>collection root</b> (parent of isolate folders). The app uses the <b>first subfolder</b> under the selected root as the isolate name and searches any depth for GenBank files.<br/>Supports <span class="mono">.gb .gbk .gbff .gbf .genbank</span> (and <span class="mono">.gz</span>).</p>
+      <input type="file" id="folderInput" webkitdirectory directory multiple />
+      <div class="spacer"></div>
+      <div id="loadStatus" class="small muted">No folder selected.</div>
+      <div id="loadErrors" class="small error"></div>
+      <div id="fileList" class="small" style="margin-top:6px"></div>
+    </section>
+
+    <section class="card">
+      <h3>2) Choose gene</h3>
+      <label for="geneName">Gene name</label>
+      <input type="text" id="geneName" placeholder="e.g., fimH, gyrA, rpoB" />
+      <div class="grid" style="margin-top:10px">
+        <div>
+          <label for="fuzzyOn">Fuzzy matching</label>
+          <select id="fuzzyOn">
+            <option value="on" selected>On (recommended)</option>
+            <option value="off">Off (exact)</option>
+          </select>
+        </div>
+        <div>
+          <label for="fuzzyThresh">Fuzzy threshold (0–1)</label>
+          <input type="number" id="fuzzyThresh" value="0.78" step="0.01" min="0" max="1"/>
+        </div>
+      </div>
+      <div class="spacer"></div>
+      <div class="flex">
+        <button id="runSingle">Run</button>
+        <button id="exportCSV" class="secondary">Export table (CSV)</button>
+        <button id="exportExcel" class="secondary">Export table (Excel)</button>
+      </div>
+    </section>
+  </div>
+
+  <section class="card" id="resultsSection" style="display:none">
+    <h3>Results</h3>
+    <div class="grid">
+      <div><div class="muted small">Chosen gene</div><div id="chosenGene" class="mono"></div></div>
+      <div><div class="muted small">Length bucket</div><div id="bucketInfo" class="mono"></div></div>
+      <div><div class="muted small">Consensus length (bp)</div><div id="consLen" class="mono"></div></div>
+      <div><div class="muted small">Average dN/dS (corrected)</div><div id="avgRatio" class="mono"></div></div>
+      <div><div class="muted small">Average dN/dS (uncorrected)</div><div id="avgRatioRaw" class="mono"></div></div>
+    </div>
+
+    <div class="spacer"></div>
+    <div id="bucketBox" class="grid">
+      <div>
+        <div class="muted small">Bucketing tolerance (± bp)</div>
+        <input id="bucketTol" type="number" value="0" step="1" min="0"/>
+      </div>
+      <div>
+        <div class="muted small">Available buckets</div>
+        <select id="bucketSelect"></select>
+      </div>
+      <div class="flex" style="align-items:flex-end">
+        <button id="applyBucket">Apply</button>
+        <button id="clearBucket" class="secondary">Clear</button>
+      </div>
+      <div>
+        <div class="muted small">Observed lengths</div>
+        <div id="lengthSummary" class="small mono"></div>
+      </div>
+      <div>
+        <div class="muted small">Outlier threshold (% AA changed)</div>
+        <input id="outlierPct" type="number" value="5" step="0.5" min="0" max="100"/>
+      </div>
+    </div>
+
+    <div class="spacer"></div>
+    <div class="controls-row">
+      <div class="small muted">Per-row FASTA gives DNA & AA for that copy. “Per-isolate summary” & “All sequences” use first, non-outlier copy per isolate.</div>
+      <div class="flex" style="justify-content:flex-end">
+        <button id="exportPerIso" class="secondary">Export per-isolate summary (CSV)</button>
+        <button id="exportSeqAll" class="secondary">Export sequences (FASTA)</button>
+      </div>
+    </div>
+
+    <div class="spacer"></div>
+    <div style="max-height:420px;overflow:auto;border:1px solid #1e2b56;border-radius:10px">
+      <table id="singleTable">
+        <thead><tr>
+          <th>Isolate</th><th>Copy #</th><th>Contig</th><th>Location</th>
+          <th>Length (bp)</th><th>Syn (S)</th><th>NonSyn (N)</th>
+          <th>dN/dS (display)</th><th>dN/dS (corrected)</th>
+          <th>Matched field</th><th>Match text</th><th>Score</th>
+          <th>Flags</th><th>Variant label</th><th>% AA changed</th><th>Seq</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="spacer"></div>
+    <details open>
+      <summary>Variant summary</summary>
+      <div class="controls-row">
+        <div class="small muted">Only non-outlier isolates are included.</div>
+        <div class="flex" style="justify-content:flex-end">
+          <button id="exportVariants" class="secondary">Export variants (CSV)</button>
+        </div>
+      </div>
+      <div id="variantHeadline" class="small mono" style="margin-top:6px"></div>
+      <div style="max-height:360px;overflow:auto;border:1px solid #1e2b56;border-radius:10px;margin-top:6px">
+        <table id="variantTable">
+          <thead><tr>
+            <th>Variant label</th><th>Isolates (count)</th><th>Show isolates</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </details>
+
+    <div class="spacer"></div>
+    <details open>
+      <summary>Probable mutation accumulation tree</summary>
+      <div class="small muted">Boxes are center-connected to lines. Counts gray, lines blue. Only non-outliers included.</div>
+      <div class="flex" style="justify-content:flex-end;margin:6px 0">
+        <button id="exportTree" class="secondary">Export tree (JPEG)</button>
+      </div>
+      <div id="treeWrap" class="svgWrap">
+        <svg id="variantTreeSVG" width="1100" height="520" xmlns="http://www.w3.org/2000/svg"></svg>
+      </div>
+    </details>
+  </section>
+</main>
+
+<!-- ===================== CSV/Excel export helpers ===================== -->
+<script>
+function csvEscape(v){const s=String(v??'');return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s;}
+function tableToCSV(sel){
+  const t=document.querySelector(sel);
+  const rows=[...t.querySelectorAll('tr')].map(tr=>
+    [...tr.querySelectorAll('th,td')].map(td=>csvEscape(td.innerText)).join(',')
+  );
+  return rows.join('\r\n');
+}
+document.getElementById('exportCSV').onclick=()=>{
+  const csv=tableToCSV('#singleTable');
+  const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='single_gene_dnds.csv';
+  a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1200);
+};
+// Excel (styled HTML)
+document.getElementById('exportExcel').onclick=()=>{
+  const table = document.querySelector('#singleTable').cloneNode(true);
+  const style = `
+    <style>
+      table{border-collapse:collapse;font-family:Segoe UI,Roboto,Arial,sans-serif;font-size:12px}
+      th,td{border:1px solid #c7d2fe;padding:6px 8px;text-align:left;vertical-align:top}
+      th{background:#e8eefc;color:#111827;font-weight:700}
+      .pill{border-radius:999px;padding:2px 6px;border:1px solid #9ca3af}
+      .pill.warn{background:#fff7e6}.pill.danger{background:#ffeef0}.pill.info{background:#eef2ff}
+      .mono{font-family:Consolas,"Courier New",monospace}
+    </style>`;
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8">${style}</head><body>${table.outerHTML}</body></html>`;
+  const blob = new Blob([html], {type: 'application/vnd.ms-excel'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob); a.download='single_gene_dnds.xls'; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1200);
+};
+</script>
+
+<!-- ================== Folder loader ================== -->
+<script>
+let isolates={};
+const ACCEPT_EXT=['.gb','.gbk','.gbff','.gbf','.genbank'];
+function isGenBankLikeName(name){const n=name.toLowerCase();return ACCEPT_EXT.some(ext=> n.endsWith(ext) || n.endsWith(ext+'.gz'));}
+document.getElementById('folderInput').addEventListener('change', async ev=>{
+  const loadStatus=document.getElementById('loadStatus');
+  const loadErrors=document.getElementById('loadErrors');
+  const fileList=document.getElementById('fileList');
+  isolates={};
+  if(!ev.target.files||!ev.target.files.length){loadStatus.textContent='No folder selected.';return;}
+  loadStatus.textContent='Indexing files…';
+  await new Promise(requestAnimationFrame);
+  try{
+    const files=Array.from(ev.target.files);
+    for(const f of files){
+      const rel=f.webkitRelativePath||f.name;
+      const parts=rel.split('/');
+      const isolate = parts.length>1 ? parts[1] : parts[0];
+      if(!isolates[isolate]) isolates[isolate]={files:[]};
+      if(isGenBankLikeName(f.name)) isolates[isolate].files.push(f);
+    }
+    const isoNames=Object.keys(isolates);
+    const totalGB=isoNames.reduce((s,k)=>s+isolates[k].files.length,0);
+    const preview=isoNames.slice(0,12).map(iso=>`<div class="small mono">${iso}: ${isolates[iso].files.length} file(s)</div>`);
+    if(isoNames.length>12)preview.push(`<div class="small muted">…+${isoNames.length-12} more isolates</div>`);
+    fileList.innerHTML=preview.join('');
+    loadStatus.innerHTML=`<span class="oktxt">Ready:</span> ${isoNames.length} isolates; ${totalGB} GenBank file(s).`;
+  }catch(err){
+    loadErrors.textContent='Indexing error: '+(err.message||err);
+    loadStatus.textContent='Indexing finished with errors.';
+  }
+});
+</script>
+
+<!-- ================= GenBank streaming parser + CDS-finder ================= -->
+<script>
+async function* streamLines(file){
+  const gz=file.name.toLowerCase().endsWith('.gz');
+  if(gz && typeof DecompressionStream!=='function'){throw new Error('GZIP not supported in this browser for: '+file.name);}
+  const stream=gz?file.stream().pipeThrough(new DecompressionStream('gzip')):file.stream();
+  const textStream=stream.pipeThrough(new TextDecoderStream());
+  const reader=textStream.getReader();
+  let buf=''; while(true){const {value,done}=await reader.read(); if(done)break; buf+=value; const parts=buf.split(/\r?\n/); buf=parts.pop(); for(const L of parts) yield L;}
+  if(buf) yield buf;
+}
+
+function normalizeStr(s){return (s||'').toLowerCase().replace(/[^a-z0-9]+/g,'').trim();}
+function levenshtein(a,b){a=normalizeStr(a);b=normalizeStr(b);const m=a.length,n=b.length;if(!m)return n;if(!n)return m;const d=new Array(n+1);for(let j=0;j<=n;j++)d[j]=j;for(let i=1;i<=m;i++){let p=d[0];d[0]=i;for(let j=1;j<=n;j++){const t=d[j];d[j]=Math.min(d[j]+1,d[j-1]+1,p+(a[i-1]===b[j-1]?0:1));p=t;}}return d[n];}
+function similarity(a,b){a=normalizeStr(a);b=normalizeStr(b);if(!a&&!b)return 1;if(!a||!b)return 0;const L=Math.max(a.length,b.length);return 1-levenshtein(a,b)/L;}
+function fuzzyScore(q,c){if(!c)return 0;const Q=normalizeStr(q),C=normalizeStr(c);if(!Q||!C)return 0;if(Q===C)return 1;if(C.includes(Q))return Math.max(0.92,similarity(Q,C));if(Q.includes(C))return Math.max(0.90,similarity(Q,C));return similarity(Q,C);}
+
+function parseLocation(raw){
+  let s=raw.replace(/\s+/g,''); s=s.replace(/order\(/g,'join(');
+  function strip(x){return x.replace(/[<>]/g,'');}
+  function rec(seg,sgn=1){
+    while(seg.startsWith('complement(')&&seg.endsWith(')')){sgn*=-1;seg=seg.slice(11,-1);}
+    if(seg.startsWith('join(')&&seg.endsWith(')')){
+      const inside=seg.slice(5,-1); const parts=[]; let d=0,cur='';
+      for(let i=0;i<inside.length;i++){const ch=inside[i]; if(ch==='(')d++; if(ch===')')d--; if(ch===','&&d===0){parts.push(cur);cur='';} else {cur+=ch;}}
+      if(cur)parts.push(cur);
+      return parts.flatMap(p=>rec(p,sgn));
+    }
+    const mm=strip(seg).match(/(\d+)\.\.(\d+)/); if(mm) return [{start:+mm[1],end:+mm[2],strand:sgn}];
+    const m1=strip(seg).match(/^(\d+)$/); if(m1) return [{start:+m1[1],end:+m1[1],strand:sgn}];
+    return [];
+  }
+  return rec(s,1).sort((a,b)=>a.start-b.start);
+}
+function rangesOverlap(a,b){for(const x of a){for(const y of b){if(x.end>=y.start&&y.end>=x.start)return true;}}return false;}
+function revComp(s){const m={A:'T',T:'A',C:'G',G:'C'};return s.split('').reverse().map(ch=>m[ch]||'N').join('');}
+
+function makeFeaturesStreamScanner(geneQuery,useFuzzy,thresh,recName){
+  const QUAL_KEYS=['gene','locus_tag','product','old_locus_tag','gene_synonym','note'];
+  const geneFeatures=[];
+  let cur=null, curQKey='', curQString=null;
+  const targets=[];
+
+  function bestMatch(q, texts){
+    let best={field:'',text:'',score:0};
+    for(const k of Object.keys(texts)){
+      if(!QUAL_KEYS.includes(k)) continue;
+      for(const v of texts[k]||[]){
+        const sc=useFuzzy?fuzzyScore(q,v):(normalizeStr(geneQuery)===normalizeStr(v)?1:0);
+        if(sc>best.score) best={field:k,text:v,score:sc};
+      }
+    }
+    return best;
+  }
+  function flushQualifier(){
+    if(cur && curQKey){
+      const val=(curQString??'').replace(/^"/,'').replace(/"$/,'');
+      if(!cur.qual[curQKey]) cur.qual[curQKey]=[];
+      cur.qual[curQKey].push(val);
+      curQKey=''; curQString=null;
+    }
+  }
+  function flushFeature(){
+    flushQualifier();
+    if(!cur) return;
+    const type=(cur.type||'').toLowerCase();
+    const loc=cur.rawLoc||'';
+    if(type==='gene' && loc){
+      const segs=parseLocation(loc);
+      const names=[];
+      for(const k of ['gene','locus_tag','old_locus_tag','gene_synonym']) if(cur.qual[k]) names.push(...cur.qual[k]);
+      if(segs.length && names.length) geneFeatures.push({segments:segs,names});
+    }
+    if(type==='cds' && loc){
+      const segs=parseLocation(loc);
+      if(segs.length){
+        let best=bestMatch(geneQuery,cur.qual);
+        let ok=useFuzzy?(best.score>=thresh):(normalizeStr(geneQuery)===normalizeStr(best.text)?1:0);
+        if(!ok){
+          for(const gf of geneFeatures){
+            if(rangesOverlap(segs,gf.segments)){
+              for(const nm of gf.names){
+                const sc=useFuzzy?fuzzyScore(geneQuery,nm):(normalizeStr(geneQuery)===normalizeStr(nm)?1:0);
+                if(sc>best.score) best={field:'gene(feature)',text:nm,score:sc};
+              }
+            }
+          }
+          ok=useFuzzy?(best.score>=thresh):(best.score===1);
+        }
+        if(ok){
+          let codonStart=1, translTable=11;
+          if(cur.qual['codon_start'] && cur.qual['codon_start'][0]){
+            const n=parseInt(String(cur.qual['codon_start'][0]).replace(/[^0-9]/g,''),10);
+            if(n===2||n===3) codonStart=n;
+          }
+          if(cur.qual['transl_table'] && cur.qual['transl_table'][0]){
+            const t=parseInt(String(cur.qual['transl_table'][0]).replace(/[^0-9]/g,''),10);
+            if([1,4,11].includes(t)) translTable=t;
+          }
+          targets.push({
+            recName: recName||'',
+            segments:segs,strand:segs[0].strand||1,
+            codonStart,translTable,
+            matchedField:best.field,matchedText:best.text,matchedScore:best.score,
+            seq:'',segIdx:0
+          });
+        }
+      }
+    }
+    cur=null;
+  }
+  function onFeaturesLine(L){
+    if(/^\s{5}\S/.test(L)){
+      flushFeature();
+      const m=L.match(/^\s{5}(\S+)\s+(.+)$/);
+      cur=m?{type:m[1],rawLoc:m[2],qual:{}}:null;
+      return;
+    }
+    if(/^\s{21}\/(\S+)=(.+)$/.test(L) && cur){
+      flushQualifier();
+      const m=L.match(/^\s{21}\/(\S+)=(.+)$/);
+      if(m){curQKey=m[1].toLowerCase(); curQString=m[2].trim();}
+      return;
+    }
+    if(/^\s{21}(?!\/)(.+)$/.test(L) && cur){
+      const cont=L.slice(21).trim();
+      if(curQKey){curQString+=(curQString?' ':'')+cont; return;}
+      if(Object.keys(cur.qual).length){
+        const k=Object.keys(cur.qual).slice(-1)[0];
+        cur.qual[k][cur.qual[k].length-1]+=' '+cont.replace(/^"|"$/g,'');
+      }
+    }
+  }
+  return {onFeaturesLine,flushFeature,targets};
+}
+
+async function findCDSByGeneStreaming(file,geneQuery,useFuzzy,thresh){
+  const hits=[];
+  let inRec=false,inFeat=false,inOrigin=false,seqPos=0, recName='';
+  let scanner=null,pending=null;
+
+  function finalize(){
+    if(pending && pending.length){
+      for(const t of pending){
+        let s=t.seq;
+        if(t.strand===-1) s=revComp(s);
+        const shift=((t.codonStart||1)-1)%3;
+        if(shift>0) s=s.slice(shift);
+        const rem=s.length%3;
+        if(rem) s=s.slice(0,s.length-rem);
+        if(s.length>=3){
+          hits.push({
+            seq:s,strand:t.strand,segments:t.segments,
+            codonStart:t.codonStart||1, translTable:t.translTable||11,
+            contig: t.recName||'',
+            matchedField:t.matchedField,matchedText:t.matchedText,matchedScore:t.matchedScore
+          });
+        }
+      }
+    }
+  }
+
+  for await(const L of streamLines(file)){
+    if(/^LOCUS\b/.test(L)){
+      finalize();
+      inRec=true; inFeat=false; inOrigin=false; seqPos=0;
+      const m=L.match(/^LOCUS\s+(\S+)/); recName = m? m[1] : '';
+      scanner=makeFeaturesStreamScanner(geneQuery,useFuzzy,thresh,recName); pending=null; continue;
+    }
+    if(!inRec) continue;
+    if(/^FEATURES\b/.test(L)){inFeat=true; inOrigin=false; continue;}
+    if(/^ORIGIN\b/.test(L)){inFeat=false; inOrigin=true; if(scanner)scanner.flushFeature(); pending=scanner?scanner.targets:[]; seqPos=0; continue;}
+    if(/^\/\/\s*$/.test(L)){finalize(); inRec=false; inFeat=false; inOrigin=false; seqPos=0; scanner=null; pending=null; continue;}
+    if(inFeat&&scanner){scanner.onFeaturesLine(L); continue;}
+    if(inOrigin&&pending){
+      const bases=L.replace(/[^acgtACGT]/g,'').toUpperCase();
+      if(!bases) continue;
+      for(let i=0;i<bases.length;i++){
+        seqPos++;
+        for(const t of pending){
+          while(t.segIdx<t.segments.length && seqPos>t.segments[t.segIdx].end) t.segIdx++;
+          if(t.segIdx>=t.segments.length) continue;
+          const seg=t.segments[t.segIdx];
+          if(seqPos>=seg.start && seqPos<=seg.end) t.seq+=bases[i];
+        }
+      }
+    }
+  }
+  finalize();
+  return hits;
+}
+</script>
+
+<!-- ================= Translation, alignment, consensus, variants ================= -->
+<script>
+const CODON_TABLES={1:{TTT:'F',TTC:'F',TTA:'L',TTG:'L',TCT:'S',TCC:'S',TCA:'S',TCG:'S',TAT:'Y',TAC:'Y',TAA:'*',TAG:'*',TGT:'C',TGC:'C',TGA:'*',TGG:'W',CTT:'L',CTC:'L',CTA:'L',CTG:'L',CCT:'P',CCC:'P',CCA:'P',CCG:'P',CAT:'H',CAC:'H',CAA:'Q',CAG:'Q',CGT:'R',CGC:'R',CGA:'R',CGG:'R',ATT:'I',ATC:'I',ATA:'I',ATG:'M',ACT:'T',ACC:'T',ACA:'T',ACG:'T',AAT:'N',AAC:'N',AAA:'K',AAG:'K',AGT:'S',AGC:'S',AGA:'R',AGG:'R',GTT:'V',GTC:'V',GTA:'V',GTG:'V',GCT:'A',GCC:'A',GCA:'A',GCG:'A',GAT:'D',GAC:'D',GAA:'E',GAG:'E',GGT:'G',GGC:'G',GGA:'G',GGG:'G'},11:null,4:null};
+CODON_TABLES[11]=CODON_TABLES[1]; CODON_TABLES[4]=Object.assign({},CODON_TABLES[1],{TGA:'W'});
+
+function aaFromCodon(c,t=11){if(!/^[ACGT]{3}$/.test(c))return'X';return (CODON_TABLES[t]||CODON_TABLES[11])[c]||'X';}
+function translateDNA(dna,t=11){const s=dna.replace(/[^ACGT]/g,'').toUpperCase();let aa='';for(let i=0;i+2<s.length;i+=3){aa+=aaFromCodon(s.slice(i,i+3),t);}return aa;}
+function toCodons(seq){const s=seq.replace(/[^ACGT]/g,'').toUpperCase();const out=[];for(let i=0;i+2<s.length;i+=3)out.push(s.slice(i,i+3));return out;}
+function validCodon(c){return /^[ACGT]{3}$/.test(c);}
+
+function alignProteins(a,b){
+  const m=a.length,n=b.length,match=2,mismatch=-1,gap=-2,s=(x,y)=>x===y?match:mismatch;
+  const dp=Array(m+1),bt=Array(m+1);
+  for(let i=0;i<=m;i++){dp[i]=Array(n+1).fill(0);bt[i]=Array(n+1).fill(0);}
+  for(let i=1;i<=m;i++){dp[i][0]=i*gap;bt[i][0]=1;}
+  for(let j=1;j<=n;j++){dp[0][j]=j*gap;bt[0][j]=2;}
+  for(let i=1;i<=m;i++){for(let j=1;j<=n;j++){
+    const diag=dp[i-1][j-1]+s(a[i-1],b[j-1]);
+    const up=dp[i-1][j]+gap;
+    const left=dp[i][j-1]+gap;
+    const best=Math.max(diag,up,left);
+    dp[i][j]=best; bt[i][j]=best===diag?0:(best===up?1:2);
+  }}
+  let i=m,j=n,alA='',alB='';
+  while(i>0||j>0){
+    const t=(i>0&&j>0)?bt[i][j]:(i>0?1:2);
+    if(t===0){alA=a[i-1]+alA;alB=b[j-1]+alB;i--;j--;}
+    else if(t===1){alA=a[i-1]+alA;alB='-'+alB;i--;}
+    else{alA='-'+alA;alB=b[j-1]+alB;j--;}
+  }
+  return[alA,alB];
+}
+
+function gappedCodonStrings(refDNA,isoDNA,refAA_aln,isoAA_aln){
+  const refCod=toCodons(refDNA),isoCod=toCodons(isoDNA);let i=0,j=0,gR='',gI='';
+  for(let k=0;k<refAA_aln.length;k++){
+    const a=refAA_aln[k],b=isoAA_aln[k];
+    if(a!=='-'&&b!=='-'){gR+=(refCod[i]||'---');gI+=(isoCod[j]||'---');i++;j++;}
+    else if(a==='-'&&b!=='-'){gR+='---';gI+=(isoCod[j]||'---');j++;}
+    else if(a!=='-'&&b==='-'){gR+=(refCod[i]||'---');gI+='---';i++;}
+  }
+  return[gR,gI];
+}
+
+function snOnAlignedCodons(gRef,gIso,t=11){
+  let syn=0,non=0;
+  for(let i=0;i+2<gRef.length&&i+2<gIso.length;i+=3){
+    const cR=gRef.slice(i,i+3),cI=gIso.slice(i,i+3);
+    if(cR==='---'||cI==='---')continue;
+    if(!validCodon(cR)||!validCodon(cI))continue;
+    const aaR=aaFromCodon(cR,t),aaI=aaFromCodon(cI,t);
+    if(aaR==='*'||aaI==='*')continue;
+    if(cR===cI)continue;
+    const d=(cR[0]!==cI[0])+(cR[1]!==cI[1])+(cR[2]!==cI[2]);
+    if(aaR===aaI)syn+=d; else non+=d;
+  }
+  return{syn,nonsyn:non};
+}
+
+function variantLabelFromAlign(refAA,isoAA){
+  const labels=[];
+  for(let i=0;i<refAA.length&&i<isoAA.length;i++){
+    const r=refAA[i],q=isoAA[i];
+    if(r==='-'||q==='-'||r==='*'||q==='*')continue;
+    if(r!==q)labels.push(r+(i+1)+q);
+  }
+  return labels.join('+');
+}
+
+function majorityBase(bases){
+  const c={A:0,C:0,G:0,T:0};
+  for(const b of bases){const B=(b||'').toUpperCase();if(c[B]!=null)c[B]++;}
+  let best='A',max=-1;
+  for(const k in c){if(c[k]>max){max=c[k];best=k;}}
+  return best;
+}
+function buildConsensus(seqs){
+  if(!seqs.length)return'';
+  const L=Math.min(...seqs.map(s=>s.length));
+  const cols=[];for(let i=0;i<L;i++){cols.push(seqs.map(s=>s[i]));}
+  return cols.map(col=>majorityBase(col)).join('');
+}
+function flagsFor(hits,consLen){
+  const f=[];
+  if(hits.length===0){f.push('MISSING');return f;}
+  if(hits.length>1)f.push('MULTICOPY');
+  for(const h of hits){if(consLen>0&&h.seq.length<0.9*consLen)f.push('PARTIAL');}
+  if(hits.some(h=>h.matchedScore<0.999))f.push('FUZZY');
+  return[...new Set(f)];
+}
+function safeMean(arr){if(!arr.length)return'';return(arr.reduce((a,b)=>a+b,0)/arr.length).toFixed(3)}
+function bucketizeLengths(lengths,tol){
+  const L=[...new Set(lengths)].sort((a,b)=>a-b);
+  const buckets=[];
+  for(const x of L){
+    let placed=false;
+    for(const b of buckets){
+      if(Math.abs(x-b.center)<=tol){b.members.add(x);placed=true;break;}
+    }
+    if(!placed)buckets.push({center:x,count:0,members:new Set([x])});
+  }
+  return buckets;
+}
+</script>
+
+<!-- ========================= Run logic & UI wiring ========================= -->
+<script>
+const runBtn=document.getElementById('runSingle');
+const resultsSection=document.getElementById('resultsSection');
+const chosenGeneEl=document.getElementById('chosenGene');
+const consLenEl=document.getElementById('consLen');
+const avgRatioEl=document.getElementById('avgRatio');
+const avgRatioRawEl=document.getElementById('avgRatioRaw');
+const bucketInfoEl=document.getElementById('bucketInfo');
+const bucketTol=document.getElementById('bucketTol');
+const bucketSelect=document.getElementById('bucketSelect');
+const lengthSummary=document.getElementById('lengthSummary');
+const outlierPctEl=document.getElementById('outlierPct');
+const applyBucket=document.getElementById('applyBucket');
+const clearBucket=document.getElementById('clearBucket');
+const tbody=document.querySelector('#singleTable tbody');
+const variantHeadline=document.getElementById('variantHeadline');
+const variantTableBody=document.querySelector('#variantTable tbody');
+const variantTreeSVG=document.getElementById('variantTreeSVG');
+
+const exportPerIsoBtn=document.getElementById('exportPerIso');
+const exportSeqAllBtn=document.getElementById('exportSeqAll');
+document.getElementById('exportVariants').onclick=()=>{ exportVariantsCSV(); };
+document.getElementById('exportTree').onclick=()=>{exportSVGAsJPEG(variantTreeSVG,'variant_tree.jpg');};
+
+let lastHits=null;
+let activeBucket=null;
+let lastVariantsIncluded=[]; // {iso, variant}
+let lastPerIso=[];          // per-isolate included summary for exports
+let lastRows=[];            // full table row objects for per-row fasta
+
+runBtn.addEventListener('click', ()=>{ 
+  const gene=(document.getElementById('geneName').value||'').trim(); 
+  if(!gene){alert('Enter a gene'); return;} 
+  runGene(gene); 
+});
+
+async function runGene(gene){
+  const useFuzzy=document.getElementById('fuzzyOn').value==='on';
+  const thresh=parseFloat(document.getElementById('fuzzyThresh').value)||0.78;
+  resultsSection.style.display='block';
+  chosenGeneEl.textContent=gene;
+  tbody.innerHTML=''; consLenEl.textContent=''; avgRatioEl.textContent=''; avgRatioRawEl.textContent=''; bucketInfoEl.textContent='';
+  variantHeadline.textContent=''; variantTableBody.innerHTML=''; clearSVG();
+
+  const isoNames=Object.keys(isolates);
+  const perIso=[];
+  for(let i=0;i<isoNames.length;i++){
+    const iso=isoNames[i], files=isolates[iso].files||[];
+    document.getElementById('loadStatus').textContent=`Scanning ${iso} (${i+1}/${isoNames.length})…`;
+    let isoHits=[];
+    for(const f of files){
+      try{ const hits=await findCDSByGeneStreaming(f,gene,useFuzzy,thresh); if(hits.length){ isoHits=hits; break; } }
+      catch(e){ const errEl=document.getElementById('loadErrors'); errEl.textContent+=(errEl.textContent?'\n':'')+`• ${f.webkitRelativePath||f.name}: ${e.message||e}`; }
+    }
+    perIso.push({iso,hits:isoHits});
+  }
+  lastHits=perIso;
+  setupBuckets(perIso);
+  applyCurrentBucket();
+  document.getElementById('loadStatus').innerHTML=`<span class="oktxt">Done.</span> Processed ${isoNames.length} isolates.`;
+}
+
+function setupBuckets(perIso){
+  const lengths = perIso.flatMap(e=> e.hits.map(h=>h.seq.length));
+  const counts = new Map(); for(const L of lengths){ counts.set(L,(counts.get(L)||0)+1); }
+  lengthSummary.textContent = [...counts.entries()].sort((a,b)=>a[0]-b[0]).map(([L,c])=>`${L}bp:${c}`).join('  ');
+  const tol = Math.max(0, parseInt(bucketTol.value||'0',10));
+  const rawBuckets = bucketizeLengths(lengths, tol);
+  for(const b of rawBuckets){ b.count = [...b.members].reduce((s,x)=>s+(counts.get(x)||0),0); }
+  bucketSelect.innerHTML='';
+  const optAll=document.createElement('option'); optAll.value=''; optAll.textContent='All lengths (no bucket)'; bucketSelect.appendChild(optAll);
+  for(const b of rawBuckets.sort((x,y)=>y.count-x.count || x.center-y.center)){
+    const min=Math.min(...b.members), max=Math.max(...b.members);
+    const lab=(min===max)?`${min} bp`:`${Math.round((min+max)/2)} bp (range ${min}–${max})`;
+    const opt=document.createElement('option'); opt.value=JSON.stringify({min,max,label:lab}); opt.textContent=`${lab} (n=${b.count})`; bucketSelect.appendChild(opt);
+  }
+  activeBucket = bucketSelect.options.length>1 ? JSON.parse(bucketSelect.options[1].value) : null;
+  bucketSelect.selectedIndex = activeBucket ? 1 : 0;
+}
+
+applyBucket.onclick = ()=>{ activeBucket = bucketSelect.value ? JSON.parse(bucketSelect.value) : null; applyCurrentBucket(); };
+clearBucket.onclick = ()=>{ bucketSelect.selectedIndex=0; activeBucket=null; applyCurrentBucket(); };
+bucketTol.onchange = ()=>{ setupBuckets(lastHits||[]); };
+outlierPctEl.onchange = ()=>{ applyCurrentBucket(); };
+
+function segsToString(segs,strand){
+  const s=segs.map(s=>`${s.start}..${s.end}`).join(';');
+  return `${s} ${strand===-1?'(-)':'(+)'}`;
+}
+
+function applyCurrentBucket(){
+  const gene=(document.getElementById('geneName').value||'').trim();
+  const perIso = lastHits||[];
+  const filtered = perIso.map(e=>{
+    const hits = activeBucket? e.hits.filter(h=> h.seq.length>=activeBucket.min && h.seq.length<=activeBucket.max ) : e.hits;
+    return {iso:e.iso, hits};
+  });
+
+  const seqsForConsensus = filtered.flatMap(e=> e.hits.length ? [e.hits[0].seq] : []);
+  const consensusDNA = buildConsensus(seqsForConsensus);
+  const consensusAA = translateDNA(consensusDNA, 11);
+  consLenEl.textContent = consensusDNA.length || '';
+  bucketInfoEl.textContent = activeBucket ? activeBucket.label : '(all lengths)';
+
+  const eps=0.5;
+  const rows=[]; 
+  const ratiosCorrIncluded=[]; 
+  const ratiosRawIncluded=[]; 
+  const variantsIncluded=[];
+  const perIsoIncluded=[];
+  const outlierPct = Math.max(0, parseFloat(outlierPctEl.value||'5'));
+
+  for(const e of filtered){
+    const flBase = flagsFor(e.hits, consensusDNA.length);
+    if(!e.hits.length){
+      rows.push({iso:e.iso, copy:0, len:'', syn:'', non:'', disp:'', corr:'', field:'', text:'', score:'', flags:flBase.join(','), variant:'', pct:'', contig:'', loc:'', dna:'', aa:'', strand:'', tt:11, cs:1});
+      continue;
+    }
+    let c=0;
+    for(const h of e.hits){
+      c++;
+      const isoAA = translateDNA(h.seq, h.translTable||11);
+      const [alRef, alIso] = alignProteins(consensusAA, isoAA);
+      const [gRef,gIso] = gappedCodonStrings(consensusDNA, h.seq, alRef, alIso);
+      const {syn,nonsyn} = snOnAlignedCodons(gRef,gIso,h.translTable||11);
+
+      let pos=0, diff=0;
+      for(let i=0;i<alRef.length&&i<alIso.length;i++){
+        const r=alRef[i], q=alIso[i];
+        if(r==='-'||q==='-'||r==='*'||q==='*') continue;
+        pos++; if(r!==q) diff++;
+      }
+      const pctChanged = pos? (100*diff/pos):0;
+      const isOutlier = pctChanged > outlierPct;
+
+      const corr=(nonsyn+eps)/(syn+eps);
+      const disp=(syn===0 && nonsyn>0)? String(nonsyn) : (syn>0 ? (nonsyn/syn).toFixed(3) : '0.000');
+      const vlabel = variantLabelFromAlign(alRef, alIso);
+
+      const flags = [...flBase, ...(isOutlier?['OUTLIER']:[])];
+      rows.push({
+        iso:e.iso, copy:c, contig:h.contig||'', loc:segsToString(h.segments,h.strand),
+        len:h.seq.length, syn, non:nonsyn, disp, corr:corr.toFixed(3),
+        field:h.matchedField||'', text:h.matchedText||'', score:(h.matchedScore||0).toFixed(3),
+        flags:[...new Set(flags)].join(','), variant:vlabel, pct:pctChanged.toFixed(1),
+        dna:h.seq, aa:isoAA, strand:h.strand, tt:h.translTable||11, cs:h.codonStart||1, gene
+      });
+
+      if(c===1 && !isOutlier){
+        ratiosCorrIncluded.push(corr);
+        if(syn>0){ ratiosRawIncluded.push(nonsyn/syn); }
+        variantsIncluded.push({iso:e.iso, variant:vlabel});
+        perIsoIncluded.push({
+          iso:e.iso, contig:h.contig||'', location:segsToString(h.segments,h.strand),
+          syn, nonsyn, raw:(syn>0?nonsyn/syn:''), corr:corr, flags:flBase.join(','), variant:vlabel,
+          dna:h.seq, aa:isoAA, strand:h.strand, tt:h.translTable||11, cs:h.codonStart||1, gene
+        });
+      }
+    }
+  }
+
+  avgRatioEl.textContent = safeMean(ratiosCorrIncluded);
+  avgRatioRawEl.textContent = safeMean(ratiosRawIncluded);
+
+  // Fill main table
+  lastRows = rows.slice();
+  tbody.innerHTML='';
+  rows.forEach((r,idx)=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td class="mono">${r.iso}</td>
+    <td>${r.copy}</td>
+    <td class="mono">${r.contig}</td>
+    <td class="mono mini">${r.loc}</td>
+    <td class="mono">${r.len}</td>
+    <td>${r.syn}</td>
+    <td>${r.non}</td>
+    <td class="mono">${r.disp}</td>
+    <td class="mono">${r.corr}</td>
+    <td class="mono">${r.field}</td>
+    <td>${r.text}</td>
+    <td class="mono">${r.score}</td>
+    <td>${(r.flags||'').split(',').filter(Boolean).map(f=>{
+      const cls=(f==='MISSING')?'danger':(f==='PARTIAL'||f==='MULTICOPY')?'warn':(f==='FUZZY')?'neutral':(f==='OUTLIER')?'info':'ok';
+      return `<span class="pill ${cls}">${f}</span>`;}).join(' ')}</td>
+    <td class="mono">${r.variant||''}</td>
+    <td class="mono">${r.pct}</td>
+    <td>${r.dna?`<button class="secondary mini" data-fasta="${idx}">FASTA</button>`:''}</td>`;
+    tbody.appendChild(tr);
+  });
+  // per-row FASTA
+  tbody.querySelectorAll('button[data-fasta]').forEach(btn=>{
+    btn.onclick=()=>downloadFASTAForRow(parseInt(btn.getAttribute('data-fasta'),10));
+  });
+
+  lastVariantsIncluded = variantsIncluded.slice();
+  lastPerIso = perIsoIncluded.slice();
+
+  renderVariantSummary(variantsIncluded);
+  renderVariantTree(variantsIncluded);
+}
+
+// per-row FASTA
+function fastaHeader(meta,isAA){
+  const {gene,iso,copy,variant,contig,loc,strand,tt,cs} = meta;
+  const type=isAA?'AA':'DNA';
+  return `>${gene||'gene'}|isolate:${iso||''}|copy:${copy||1}|type:${type}|variant:${variant||'CONSENSUS'}|contig:${contig||''}|loc:${loc||''}|strand:${strand===-1?'-':'+'}|tt:${tt||11}|cs:${cs||1}`;
+}
+function wrap60(s){return (s.match(/.{1,60}/g)||[]).join('\n');}
+function downloadFASTAForRow(i){
+  const r=lastRows[i]; if(!r||!r.dna) return;
+  const headerMeta={gene:r.gene,iso:r.iso,copy:r.copy,variant:r.variant,contig:r.contig,loc:r.loc,strand:r.strand,tt:r.tt,cs:r.cs};
+  const dnaRec = `${fastaHeader(headerMeta,false)}\n${wrap60(r.dna)}\n`;
+  const aaRec  = `${fastaHeader(headerMeta,true)}\n${wrap60(r.aa)}\n`;
+  const blob=new Blob([dnaRec+aaRec],{type:'text/plain;charset=utf-8;'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`${r.iso}_${r.gene}_copy${r.copy}.fasta`; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1200);
+}
+// export all sequences (first non-outlier copy per isolate)
+exportSeqAllBtn.onclick=()=>{
+  if(!lastPerIso.length){alert('No sequences available.'); return;}
+  const gene=(document.getElementById('geneName').value||'gene').trim();
+  const recs=[];
+  for(const p of lastPerIso){
+    const meta={gene,iso:p.iso,copy:1,variant:p.variant,contig:p.contig,loc:p.location,strand:p.strand,tt:p.tt,cs:p.cs};
+    recs.push(`${fastaHeader(meta,false)}\n${wrap60(p.dna)}\n`);
+    recs.push(`${fastaHeader(meta,true)}\n${wrap60(p.aa)}\n`);
+  }
+  const blob=new Blob([recs.join('')],{type:'text/plain;charset=utf-8;'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`${gene}_sequences.fasta`; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1200);
+};
+// per-isolate summary CSV
+exportPerIsoBtn.onclick=()=>{
+  const rows=[['Isolate','Contig','Location','S','N','dN/dS (raw)','dN/dS (corrected)','Flags','Variant'].map(csvEscape).join(',')];
+  for(const p of lastPerIso){
+    rows.push([p.iso,p.contig,p.location,p.syn,p.nonsyn,(p.raw===''?'':p.raw.toFixed(3)),p.corr.toFixed(3),p.flags,p.variant||''].map(csvEscape).join(','));
+  }
+  const blob=new Blob([rows.join('\r\n')],{type:'text/csv;charset=utf-8;'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='per_isolate_summary.csv'; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1200);
+};
+
+function renderVariantSummary(variants){
+  const groups=new Map();
+  for(const {iso,variant} of variants){
+    const key=(variant||'').trim();
+    if(!key) continue;
+    if(!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(iso);
+  }
+  const uniqueCount = groups.size;
+  variantHeadline.textContent = uniqueCount===0? 'No additional variants.' : `${uniqueCount} additional variant${uniqueCount>1?'s':''} (excluding outliers).`;
+
+  variantTableBody.innerHTML='';
+  const sorted = [...groups.entries()].sort((a,b)=>b[1].length-a[1].length || a[0].localeCompare(b[0]));
+  for(const [v,isolist] of sorted){
+    const tr=document.createElement('tr');
+    tr.innerHTML = `
+      <td class="mono">${v}</td>
+      <td>${isolist.length}</td>
+      <td>
+        <details>
+          <summary>Show</summary>
+          <div class="small mono" style="margin-top:6px">${isolist.join(', ')}</div>
+        </details>
+      </td>`;
+    variantTableBody.appendChild(tr);
+  }
+}
+
+// Variants export (CSV with full lists)
+function exportVariantsCSV(){
+  const groups=new Map();
+  for(const {iso,variant} of lastVariantsIncluded){
+    const key=(variant||'').trim(); if(!key) continue;
+    if(!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(iso);
+  }
+  const lines=[['Variant label','Isolate count','Isolates'].map(csvEscape).join(',')];
+  const sorted=[...groups.entries()].sort((a,b)=>b[1].length-a[1].length || a[0].localeCompare(b[0]));
+  for(const [v,isolist] of sorted){
+    lines.push([csvEscape(v), csvEscape(isolist.length), csvEscape(isolist.join('; '))].join(','));
+  }
+  const blob=new Blob([lines.join('\r\n')],{type:'text/csv;charset=utf-8;'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='variant_summary_full.csv'; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1200);
+}
+
+/* ===================== TREE (center-connected boxes, bus connectors) ===================== */
+function renderVariantTree(variants){
+  clearSVG();
+
+  const COLORS = {
+    bg: '#ffffff',
+    line: '#2b6cff',
+    text: '#111827',
+    count: '#6b7280',
+    boxStroke: '#a3b2e8',
+    boxFill: '#ffffff'
+  };
+  const FONT_FAMILY = 'Inter, "Segoe UI", Roboto, system-ui, -apple-system, Arial, sans-serif';
+
+  // Build nodes
+  const support = new Map();
+  for(const {iso,variant} of variants){
+    const key=variant||''; if(!support.has(key)) support.set(key,[]);
+    support.get(key).push(iso);
+  }
+  const toSet = v => v? new Set(v.split('+')) : new Set();
+  const nodes = [{id:'CONSENSUS', set:new Set(), isolates:[], children:[]}];
+  const byId = new Map([['CONSENSUS', nodes[0]]]);
+  for(const [v,isos] of support){
+    const id = v || 'CONSENSUS';
+    if(!byId.has(id)){ byId.set(id,{id, set:toSet(v), isolates:[], children:[]}); nodes.push(byId.get(id)); }
+    byId.get(id).isolates = isos;
+  }
+  // parent = largest proper subset
+  for(const node of nodes){
+    if(node.id==='CONSENSUS') continue;
+    let parent = nodes[0], best=-1;
+    for(const cand of nodes){
+      if(cand===node) continue;
+      let ok=true; for(const ch of cand.set){ if(!node.set.has(ch)) { ok=false; break; } }
+      if(ok && cand.set.size<node.set.size && cand.set.size>best){ parent=cand; best=cand.set.size; }
+    }
+    parent.children.push(node);
+  }
+
+  // measure boxes
+  const measureG=document.createElementNS('http://www.w3.org/2000/svg','g'); measureG.setAttribute('visibility','hidden'); variantTreeSVG.appendChild(measureG);
+  const padX=10,padY=6;
+  for(const n of nodes){
+    const label=(n.id==='CONSENSUS')?'CONSENSUS':n.id;
+    const t1=document.createElementNS('http://www.w3.org/2000/svg','text'); t1.setAttribute('font-size','13px'); t1.setAttribute('font-family',FONT_FAMILY); t1.textContent=label;
+    const t2=document.createElementNS('http://www.w3.org/2000/svg','text'); t2.setAttribute('font-size','12px'); t2.setAttribute('font-family',FONT_FAMILY); t2.textContent=(n.isolates?.length)?`(${n.isolates.length})`:'';
+    measureG.appendChild(t1); measureG.appendChild(t2);
+    const b1=t1.getBBox(), b2=t2.getBBox(); const gap=t2.textContent?8:0;
+    n.boxW=b1.width+gap+b2.width+2*padX; n.boxH=Math.max(b1.height,b2.height)+2*padY;
+    measureG.removeChild(t1); measureG.removeChild(t2);
+  }
+  variantTreeSVG.removeChild(measureG);
+
+  // layout
+  const baseDepth=90, maxH=Math.max(...nodes.map(n=>n.boxH||24),24);
+  const depthSep=Math.max(baseDepth,maxH+40);
+  const colSep=170, margin={top:28,right:40,bottom:28,left:40};
+
+  function collectLeaves(n,arr){ if(!n.children.length) arr.push(n); else { n.children.sort((a,b)=> (a.set.size-b.set.size)||a.id.localeCompare(b.id)); n.children.forEach(c=>collectLeaves(c,arr)); } }
+  const leaves=[]; collectLeaves(nodes[0],leaves); if(!leaves.length) leaves.push(nodes[0]);
+  for(let i=0;i<leaves.length;i++) leaves[i].x = margin.left + i*colSep;
+
+  (function assignX(n){ if(!n.children.length) return n.x; const xs=n.children.map(assignX); n.x = xs.reduce((a,b)=>a+b,0)/xs.length; return n.x; })(nodes[0]);
+  (function setDepth(n,depth=0){ n.yTop = margin.top + depth*depthSep; n.yBottom = n.yTop + (n.boxH||28); n.yCenter=(n.yTop+n.yBottom)/2; n.children.forEach(c=>setDepth(c,depth+1)); })(nodes[0]);
+
+  const maxDepth=(function d(n){return n.children.length?1+Math.max(...n.children.map(d)):0;})(nodes[0]);
+  const width=Math.max(1100, margin.left+(leaves.length-1)*colSep+margin.right+420);
+  const height=Math.max(320, margin.top+maxDepth*depthSep+margin.bottom+80);
+
+  variantTreeSVG.setAttribute('width', width); variantTreeSVG.setAttribute('height', height);
+  const bg=document.createElementNS('http://www.w3.org/2000/svg','rect'); bg.setAttribute('x','0');bg.setAttribute('y','0');bg.setAttribute('width',width);bg.setAttribute('height',height);bg.setAttribute('fill',COLORS.bg); variantTreeSVG.appendChild(bg);
+
+  // connectors
+  const junctionGap=12;
+  for(const n of nodes){
+    if(!n.children.length) continue;
+    const jY = n.yBottom + junctionGap;
+    line(n.x, n.yBottom, n.x, jY); // parent down to junction
+    const xs=n.children.map(c=>c.x); line(Math.min(...xs), jY, Math.max(...xs), jY); // bus
+    for(const c of n.children){ line(c.x, jY, c.x, c.yTop); } // child up to box top
+  }
+
+  // boxes (centered on x)
+  for(const n of nodes) drawBox(n);
+
+  function line(x1,y1,x2,y2){
+    const p=document.createElementNS('http://www.w3.org/2000/svg','path');
+    p.setAttribute('d',`M ${x1} ${y1} L ${x2} ${y2}`); p.setAttribute('fill','none'); p.setAttribute('stroke',COLORS.line); p.setAttribute('stroke-width','2'); p.setAttribute('stroke-linecap','round');
+    variantTreeSVG.appendChild(p);
+  }
+  function drawBox(n){
+    const left = n.x - n.boxW/2;
+    const top  = n.yTop;
+    const rect=document.createElementNS('http://www.w3.org/2000/svg','rect');
+    rect.setAttribute('x',left); rect.setAttribute('y',top); rect.setAttribute('width',n.boxW); rect.setAttribute('height',n.boxH);
+    rect.setAttribute('rx','8'); rect.setAttribute('ry','8'); rect.setAttribute('fill',COLORS.boxFill); rect.setAttribute('stroke',COLORS.boxStroke); rect.setAttribute('stroke-width','1.2');
+    variantTreeSVG.appendChild(rect);
+
+    const label=(n.id==='CONSENSUS')?'CONSENSUS':n.id;
+    const t1=document.createElementNS('http://www.w3.org/2000/svg','text');
+    t1.setAttribute('font-size','13px'); t1.setAttribute('font-family',FONT_FAMILY); t1.setAttribute('fill',COLORS.text);
+    t1.setAttribute('x', left+padX); t1.setAttribute('y', n.yTop + n.boxH/2); t1.setAttribute('dominant-baseline','middle');
+    t1.textContent=label; variantTreeSVG.appendChild(t1);
+
+    const cnt=(n.isolates?.length)?`(${n.isolates.length})`:'';
+    if(cnt){
+      const lb=t1.getBBox();
+      const t2=document.createElementNS('http://www.w3.org/2000/svg','text');
+      t2.setAttribute('font-size','12px'); t2.setAttribute('font-family',FONT_FAMILY); t2.setAttribute('fill',COLORS.count);
+      t2.setAttribute('x', left+padX+lb.width+8); t2.setAttribute('y', n.yTop + n.boxH/2); t2.setAttribute('dominant-baseline','middle');
+      t2.textContent=cnt; variantTreeSVG.appendChild(t2);
+    }
+  }
+}
+
+function clearSVG(){ while(variantTreeSVG.firstChild) variantTreeSVG.removeChild(variantTreeSVG.firstChild); }
+
+// JPEG export (white)
+function exportSVGAsJPEG(svgEl, filename){
+  const serializer = new XMLSerializer(); const src = serializer.serializeToString(svgEl);
+  const svg64 = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(src);
+  const img = new Image();
+  img.onload = function(){
+    const canvas = document.createElement('canvas');
+    const w = svgEl.viewBox?.baseVal?.width || svgEl.width.baseVal.value;
+    const h = svgEl.viewBox?.baseVal?.height|| svgEl.height.baseVal.value;
+    canvas.width = w; canvas.height= h;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0,0,w,h);
+    ctx.drawImage(img,0,0);
+    canvas.toBlob(blob=>{
+      const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=filename||'variant_tree.jpg'; a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href),1200);
+    }, 'image/jpeg', 0.95);
+  };
+  img.src = svg64;
+}
+</script>
+</body>
+</html>
